@@ -1,4 +1,4 @@
-# RAG-X
+# PruningRAG
 
 This repository is based on the 🥈 [solution](https://github.com/USTCAGI/CRAG-in-KDD-Cup2024) of [Meta KDD Cup '24 CRAG: Comphrensive RAG Benchmark](https://www.aicrowd.com/challenges/meta-comprehensive-rag-benchmark-kdd-cup-2024) !
 

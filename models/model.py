@@ -28,15 +28,67 @@ from loguru import logger
 from sentence_transformers import SentenceTransformer
 from utils.cragapi_wrapper import CRAG
 
+
+
+
+# 定义保存和加载缓存的文件路径
+cache_file = 'context_cache.json'
+
+# 加载缓存文件
+if os.path.exists(cache_file):
+    with open(cache_file, 'r') as f:
+        context_cache = json.load(f)
+else:
+    context_cache = {}
+
+def save_context_to_cache(query, contexts):
+    # 保存query和contexts到缓存文件中
+    context_cache[query] = contexts
+    with open(cache_file, 'w') as f:
+        json.dump(context_cache, f)
+
+def get_context_from_cache(query):
+    # 从缓存中查找query对应的contexts
+    return context_cache.get(query, None)
+
+import math
+import nltk
+from nltk.corpus import stopwords
+import string
+
+# 替换 NLTK 的停用词为手动定义的停用词列表
+STOP_WORDS = {
+    'i', 'me', 'my', 'myself', 'we', 'our', 'ours', 'ourselves', 'you', "you're",
+    "you've", "you'll", "you'd", 'your', 'yours', 'yourself', 'yourselves', 'he',
+    'him', 'his', 'himself', 'she', "she's", 'her', 'hers', 'herself', 'it', "it's",
+    'its', 'itself', 'they', 'them', 'their', 'theirs', 'themselves', 'what', 'which',
+    'who', 'whom', 'this', 'that', "that'll", 'these', 'those', 'am', 'is', 'are',
+    'was', 'were', 'be', 'been', 'being', 'have', 'has', 'had', 'having', 'do',
+    'does', 'did', 'doing', 'a', 'an', 'the', 'and', 'but', 'if', 'or', 'because',
+    'as', 'until', 'while', 'of', 'at', 'by', 'for', 'with', 'about', 'against',
+    'between', 'into', 'through', 'during', 'before', 'after', 'above', 'below',
+    'to', 'from', 'up', 'down', 'in', 'out', 'on', 'off', 'over', 'under', 'again',
+    'further', 'then', 'once'
+}
+
+# 初始化英文停用词和标点符号集
+punctuation = set(string.punctuation)
+
+# 定义过滤函数：排除停用词和标点符号
+def is_meaningful(token):
+    token = token.lower()  # 转为小写以确保匹配
+    return token not in STOP_WORDS and token not in punctuation
+
 class RAGModel:
     """
     An example RAGModel for the KDDCup 2024 Meta CRAG Challenge
     which includes all the key components of a RAG lifecycle.
     """
-    def __init__(self, chat_model, retriever, knowledge_source, prompt_type="base", icl=None):
+    def __init__(self, chat_model, retriever, knowledge_source, prompt_type="base", cache_context = False, icl=0):
         self.chat_model = chat_model
         self.retriever = retriever
         self.knowledge_source = knowledge_source
+        self.cache_context = cache_context
         SYSTEM_PROMPT = "You are a helpful assistant."
         BASELINE_SYSTEM_PROMPT = "You are provided with a question and various references. Your task is to answer the question succinctly, using the fewest words possible. If the references do not contain the necessary information to answer the question, respond with 'I don't know'. There is no need to explain the reasoning behind your answers."
         self.prompt_type = prompt_type
@@ -60,11 +112,11 @@ class RAGModel:
             }
         elif icl == 2:
             self.invalid_questions_examples  = {
-                "finance": "-`when did hamburg become the biggest city of germany?` (Hamburg has never been the biggest city in Germany.) -`did taylor swifts debut album fearless launched in 2008 in us?` ( Taylor Swift's debut album was \"Taylor Swift\" (2006). \"Fearless\" was her second album, released in 2008.)",
-                "movie": "-`how much is the worst performing stock, amazon?` (Amazon is one of the best performing stocks in the market.) -`what are the months where montana provide a ubi program?` (Montana does not have a UBI program)",
-                "sports": " - `how long was phil rudd the drummer for the band van halen?` (Phil Rudd was the drummer for AC/DC, and Alex Van Halen has been the primary drummer for Van Halen.) - `what was the name of justin bieber's album last year?` (Justin Bieber did not release an album last year.)",
-                "open": " - `when was \"soul\" released on hulu?` (The movie \"Soul\" was not released on Hulu. Instead, it was released on Disney+.) - `what year did the simpsons stop airing?` (\"The Simpsons\" is an ongoing series that has been continuously airing new episodes for over three decades.)",
-                "music": "- `what's the latest score update for OKC's game today?` (There is no game for OKC today)- `how many times has curry won the nba dunk contest?` (Steph Curry has never participated in the NBA dunk contest) "
+                "open": "-`when did hamburg become the biggest city of germany?` (Hamburg has never been the biggest city in Germany.) -`did taylor swifts debut album fearless launched in 2008 in us?` ( Taylor Swift's debut album was \"Taylor Swift\" (2006). \"Fearless\" was her second album, released in 2008.)",
+                "finance": "-`how much is the worst performing stock, amazon?` (Amazon is one of the best performing stocks in the market.) -`what are the months where montana provide a ubi program?` (Montana does not have a UBI program)",
+                "music": " - `how long was phil rudd the drummer for the band van halen?` (Phil Rudd was the drummer for AC/DC, and Alex Van Halen has been the primary drummer for Van Halen.) - `what was the name of justin bieber's album last year?` (Justin Bieber did not release an album last year.)",
+                "movie": " - `when was \"soul\" released on hulu?` (The movie \"Soul\" was not released on Hulu. Instead, it was released on Disney+.) - `what year did the simpsons stop airing?` (\"The Simpsons\" is an ongoing series that has been continuously airing new episodes for over three decades.)",
+                "sports": "- `what's the latest score update for OKC's game today?` (There is no game for OKC today)- `how many times has curry won the nba dunk contest?` (Steph Curry has never participated in the NBA dunk contest) "
             }
         elif icl == 3:
             self.invalid_questions_examples  = {
@@ -77,7 +129,10 @@ class RAGModel:
         self.chunk_extractor = ChunkExtractor()
 
 
-        
+        self.confidence_prompt = ChatPromptTemplate.from_messages(
+            [("system", SYSTEM_PROMPT), ("user", Confidence)]
+        )
+        self.confidence_chain = self.confidence_prompt | chat_model | StrOutputParser()
 
         if prompt_type == "base":
             if knowledge_source == "llm":
@@ -184,6 +239,7 @@ class RAGModel:
             self.rag_chain = self.prompt_template | chat_model | StrOutputParser() | self.get_final_answer
         else:
             self.rag_chain = self.prompt_template | chat_model | StrOutputParser() 
+            # self.rag_chain = self.prompt_template | chat_model 
         self.NER_prompt_template = ChatPromptTemplate.from_messages(
             [("system", Entity_Extract_TEMPLATE), ("user", NER_USER)],
         )
@@ -213,7 +269,7 @@ class RAGModel:
                 num_labels=len(self.domain_classes),
                 torch_dtype=torch.bfloat16,
             )
-            self.domain_router_model = PeftModel.from_pretrained(self.domain_router_model, domain_router_model_name, adapter_name="domain_router")
+            self.domain_router_model = PeftModel.from_pretrained(self.domain_router_model, domain_router_model_name, adapter_name="domain_router", device_map="auto")
 
             if self.router_tokenizer.pad_token is None:
                 self.router_tokenizer.pad_token = self.router_tokenizer.eos_token
@@ -441,7 +497,7 @@ class RAGModel:
         if self.prompt_type == "cot_icl":
             if self.knowledge_source in ["web", "llm_web", "all", "llm_all"]:
                 # Retrieve references from Web
-                contexts = self.retrieve({"query": query, "interaction_id": interaction_id, "search_results": search_results, "invalid_questions_examples":self.invalid_questions_examples[domain]})
+                contexts = self.retrieve({"query": query, "interaction_id": interaction_id, "search_results": search_results})
                 web_info = self.get_reference(contexts)
             if self.knowledge_source == "llm":
                 response = self.rag_chain.invoke({"query": query, "query_time": query_time, "invalid_questions_examples":self.invalid_questions_examples[domain]})
@@ -485,7 +541,16 @@ class RAGModel:
         else:
             if self.knowledge_source in ["web", "llm_web", "all", "llm_all"]:
                 # Retrieve references from Web
-                contexts = self.retrieve({"query": query, "interaction_id": interaction_id, "search_results": search_results})
+                if self.cache_context == False:
+                    contexts = self.retrieve({"query": query, "interaction_id": interaction_id, "search_results": search_results})
+                    save_context_to_cache(query, contexts)  # 保存到缓存
+                else:
+                    contexts =  get_context_from_cache(query)
+                    if contexts is None:
+                        # 如果缓存中不存在对应的contexts，则重新检索
+                        contexts = self.retrieve({"query": query, "interaction_id": interaction_id, "search_results": search_results})
+                        save_context_to_cache(query, contexts)  # 再次保存到缓存
+            
                 web_info = self.get_reference(contexts)
             if self.knowledge_source == "llm":
                 response = self.rag_chain.invoke({"query": query, "query_time": query_time})
@@ -493,11 +558,36 @@ class RAGModel:
                 response = self.rag_chain.invoke({"query": query, "query_time": query_time, "references": web_info})
             elif self.knowledge_source in ["kg", "llm_kg"]:
                 response = self.rag_chain.invoke({"query": query, "query_time": query_time, "references": kg_info})
+                # response = self.confidence_chain.invoke({"query": query, "references": kg_info})
+                # if response == "yes":
+                #     response = self.rag_chain.invoke({"query": query, "query_time": query_time, "references": kg_info})
+                #     log_probs = response.response_metadata["logprobs"]["content"]
+                #     meaningful_log_probs = [token_info for token_info in log_probs if is_meaningful(token_info['token'])]
+                #     entropy = -sum(math.exp(token_info['logprob']) * token_info['logprob'] for token_info in meaningful_log_probs) / len(meaningful_log_probs)
+                #     print(f"Entropy: {entropy}")
+                #     if entropy > 0.2:
+                #         response = "I don't know"
+                #     else:
+                #         response = response.content
+                # else:
+                #     response = "I don't know"
+                # log_probs = response.response_metadata["logprobs"]["content"]
+                # meaningful_log_probs = [token_info for token_info in log_probs if is_meaningful(token_info['token'])]
+                # entropy = -sum(math.exp(token_info['logprob']) * token_info['logprob'] for token_info in meaningful_log_probs) / len(meaningful_log_probs)
+                # print(f"Entropy: {entropy}")
+                # if entropy > 0.2:
+                #     response = "I don't know"
+                # else:
+                #     response = response.content
+
+                    
+                    
+
             elif self.knowledge_source in ["all", "llm_all"]:
                 response = self.rag_chain.invoke({"query": query, "query_time": query_time, "web_infos": web_info, "kg_infos": kg_info})
             # print("contexts:", contexts)
         print("response:", response)
-        return response, contexts
+        return response, contexts,kg_info
     
     def generate_answer_(self, input):
         query = input["query"]
@@ -528,8 +618,9 @@ class RAGModel:
         outputs = RunnableLambda(self.generate_answer_).batch([{"query": query, "interaction_id": interaction_id, "search_results": search_results, "kg_info": kg_info, "query_time": query_time, "domain":domain} for query, interaction_id, search_results, kg_info, query_time,domain in zip(queries, batch_interaction_ids, batch_search_results, kg_infos, query_times, domains)])
         answers = [output[0] for output in outputs]
         batch_contexts = [output[1] for output in outputs]
+        batch_kg_infos = [output[2] for output in outputs]
         # print("batch_contexts:", batch_contexts)
-        return answers, batch_contexts
+        return answers, batch_contexts, batch_kg_infos
     
     def get_reference(self, retrieval_results):
         references = ""
@@ -737,7 +828,7 @@ class RAGModel_2Stage:
                 response = self.rag_chain.invoke({"query": query, "query_time": query_time, "references": kg_info})
             elif self.knowledge_source in ["all", "llm_all"]:
                 response = self.rag_chain.invoke({"query": query, "query_time": query_time, "web_infos": web_info, "kg_infos": kg_info})
-        return response, contexts
+        return response, contexts, kg_info
     
     def generate_answer_(self, input):
         query = input["query"]
@@ -765,8 +856,9 @@ class RAGModel_2Stage:
         outputs = RunnableLambda(self.generate_answer_).batch([{"query": query, "interaction_id": interaction_id, "search_results": search_results, "kg_info": kg_info, "query_time": query_time} for query, interaction_id, search_results, kg_info, query_time in zip(queries, batch_interaction_ids, batch_search_results, kg_infos, query_times)])
         answers = [output[0] for output in outputs]
         batch_contexts = [output[1] for output in outputs]
+        batch_kg_infos = [output[2] for output in outputs]
         # print("batch_contexts:", batch_contexts)
-        return answers, batch_contexts
+        return answers, batch_contexts, batch_kg_infos
     
     def get_reference(self, retrieval_results):
         references = ""
@@ -912,7 +1004,7 @@ class RAGModel_3Stage:
                 prompt_template = ChatPromptTemplate.from_messages(
                     [("system", SYSTEM_PROMPT), ("user", WEB_ONLY_COT)],
                 )
-                rag_chain = prompt_template | self.chat_model | StrOutputParser() | self.get_final_answer
+                rag_chain = prompt_template | self.chat_model | StrOutputParser() | self.get_final_answer #get_final_answer与COT同时用
                 response = rag_chain.invoke({"query": query, "query_time": query_time, "references": web_info})
             elif knowledge_source in ["kg"]:
                 prompt_template = ChatPromptTemplate.from_messages(
@@ -931,7 +1023,7 @@ class RAGModel_3Stage:
             print("response1:", response)
             # print("response_type:", type(response))
             # print("contexts:", contexts)
-        return response, contexts
+        return response, contexts, kg_info
     
     def generate_answer_(self, input):
         query = input["query"]
@@ -959,8 +1051,9 @@ class RAGModel_3Stage:
         outputs = RunnableLambda(self.generate_answer_).batch([{"query": query, "interaction_id": interaction_id, "search_results": search_results, "kg_info": kg_info, "query_time": query_time} for query, interaction_id, search_results, kg_info, query_time in zip(queries, batch_interaction_ids, batch_search_results, kg_infos, query_times)])
         answers = [output[0] for output in outputs]
         batch_contexts = [output[1] for output in outputs]
+        batch_kg_infos = [output[2] for output in outputs]
         # print("batch_contexts:", batch_contexts)
-        return answers, batch_contexts
+        return answers, batch_contexts, batch_kg_infos
     
     def get_reference(self, retrieval_results):
         references = ""
@@ -999,6 +1092,415 @@ class RAGModel_3Stage:
         predicted_class_indices = logits.argmax(dim=1).tolist()
 
         return predicted_class_indices
+
+    
+    
+class RAGModel_4Stage:
+    """
+    An example RAGModel for the KDDCup 2024 Meta CRAG Challenge
+    which includes all the key components of a RAG lifecycle.
+    """
+    def __init__(self, chat_model,  retriever, knowledge_source, select_model):
+        self.chat_model = chat_model
+        self.select_model = select_model
+        self.retriever = retriever
+        self.knowledge_source = knowledge_source
+        SYSTEM_PROMPT = "You are a helpful assistant."
+        self.llm_prompt_template = ChatPromptTemplate.from_messages(
+            [("system", SYSTEM_PROMPT), ("user", LLM_ONLY_COT)],
+        )
+        self.path_selection_prompt = ChatPromptTemplate.from_messages(
+            [("system", SYSTEM_PROMPT), ("user", PATH_SELECTION2)],
+        )
+        self.path_chain = self.path_selection_prompt | select_model | StrOutputParser() | self.path_select
+        self.llm_chain = self.llm_prompt_template | chat_model | StrOutputParser()  | self.get_final_answer
+        from transformers import AutoTokenizer
+        self.tokenizer = AutoTokenizer.from_pretrained("Meta-Llama-3.1-8B-Instruct")
+
+        self.terminators = [
+            self.tokenizer.eos_token_id,
+            self.tokenizer.convert_tokens_to_ids("<|eot_id|>")
+        ]
+        self.invalid_questions_examples  = {
+                "open": "-`when did hamburg become the biggest city of germany?` (Hamburg has never been the biggest city in Germany.) -`did taylor swifts debut album fearless launched in 2008 in us?` ( Taylor Swift's debut album was \"Taylor Swift\" (2006). \"Fearless\" was her second album, released in 2008.)",
+                "finance": "-`how much is the worst performing stock, amazon?` (Amazon is one of the best performing stocks in the market.) -`what are the months where montana provide a ubi program?` (Montana does not have a UBI program)",
+                "music": " - `how long was phil rudd the drummer for the band van halen?` (Phil Rudd was the drummer for AC/DC, and Alex Van Halen has been the primary drummer for Van Halen.) - `what was the name of justin bieber's album last year?` (Justin Bieber did not release an album last year.)",
+                "movie": " - `when was \"soul\" released on hulu?` (The movie \"Soul\" was not released on Hulu. Instead, it was released on Disney+.) - `what year did the simpsons stop airing?` (\"The Simpsons\" is an ongoing series that has been continuously airing new episodes for over three decades.)",
+                "sports": "- `what's the latest score update for OKC's game today?` (There is no game for OKC today)- `how many times has curry won the nba dunk contest?` (Steph Curry has never participated in the NBA dunk contest) "
+            }
+        self.api = MockAPI(self.chat_model, self.terminators, self.tokenizer)
+        self.classify_model_name = "Meta-Llama-3.1-8B-Instruct"
+        self.use_domain = True
+        if self.use_domain:
+            domain_router_model_name = 'models/router/domain'
+            self.domain_classes = ["finance", "music", "movie", "sports", "open"]
+            
+            
+            self.router_tokenizer = AutoTokenizer.from_pretrained(self.classify_model_name)
+            
+            self.domain_router_model = AutoModelForSequenceClassification.from_pretrained(
+                self.classify_model_name,
+                device_map="cpu",
+                num_labels=len(self.domain_classes),
+                # quantization_config=bnb_config,
+                torch_dtype=torch.bfloat16,
+            )
+            self.domain_router_model = PeftModel.from_pretrained(self.domain_router_model, domain_router_model_name, adapter_name="domain_router")
+
+            if self.router_tokenizer.pad_token is None:
+                self.router_tokenizer.pad_token = self.router_tokenizer.eos_token
+            if self.domain_router_model.config.pad_token_id is None:
+                self.domain_router_model.config.pad_token_id = self.router_tokenizer.pad_token_id
+    def get_final_answer(self, text):
+            # 找到标志字符串的位置
+        marker = "### Final Answer"
+        marker_index = text.find(marker)
+        # print("mark:", marker_index)
+        if marker_index == -1:
+            # 如果没有找到标志字符串，返回空字符串
+            # print("i don't know1111111111111111111111111111111111")
+            return "i don't know"
+        
+        # 获取标志字符串后面的内容
+        content_start_index = marker_index + len(marker)
+        final_answer_content = text[content_start_index:].strip()    
+        return final_answer_content
+            
+    def path_select(self, text):
+        if len(text) == 1:
+            if text == "a":
+                return "web"
+            elif text == "b":
+                return "kg"
+            elif text == "c":
+                return "llm"
+            else:
+                # return "wrong"
+                return "kg"
+        elif len(text) > 1:
+            if text[:2] == "a " or text[:2] == "a)":
+                return "web"
+            elif text[:2] == "b " or text[:2] == "b)":
+                return "kg"
+            elif text[:2] == "c " or text[:2] == "c)":
+                return "llm"
+            else:
+                # return "wrong"
+                return "kg"
+
+    def retrieve(self, input):
+        query = input["query"]
+        interaction_id = input["interaction_id"]
+        search_results = input["search_results"]
+        return self.retriever.retrieve(query, interaction_id, search_results)
+    
+    def generate_answer(self, query, interaction_id, search_results, kg_info, query_time, domain):
+
+        # print("response_type:", type(response))
+        contexts = []
+        SYSTEM_PROMPT = "You are a helpful assistant."
+        
+        knowledge_source = self.path_chain.invoke({"query": query})
+        print("knowledge_source:", knowledge_source)
+        if knowledge_source in ["web"]:
+            # Retrieve references from Web
+            contexts = self.retrieve({"query": query, "interaction_id": interaction_id, "search_results": search_results})
+            web_info = self.get_reference(contexts)
+        if knowledge_source in ["web"]:
+            prompt_template = ChatPromptTemplate.from_messages(
+                [("system", SYSTEM_PROMPT), ("user", WEB_ONLY_ICL)],
+            )
+            # rag_chain = prompt_template | self.chat_model | StrOutputParser() | self.get_final_answer
+            rag_chain = prompt_template | self.chat_model | StrOutputParser()
+            # response = rag_chain.invoke({"query": query, "query_time": query_time, "references": web_info})
+            response = rag_chain.invoke({"query": query, "query_time": query_time, "references": web_info, "invalid_questions_examples":self.invalid_questions_examples[domain]})
+            kg_info = ""
+        elif knowledge_source in ["kg"]:
+            prompt_template = ChatPromptTemplate.from_messages(
+                [("system", SYSTEM_PROMPT), ("user", KG_ONLY_ICL)],
+            )
+            # rag_chain = prompt_template | self.chat_model | StrOutputParser() | self.get_final_answer
+            rag_chain = prompt_template | self.chat_model | StrOutputParser()
+            # response = rag_chain.invoke({"query": query, "query_time": query_time, "references": kg_info})
+            response = rag_chain.invoke({"query": query, "query_time": query_time, "references": kg_info,"invalid_questions_examples":self.invalid_questions_examples[domain]})
+        elif knowledge_source in ["llm"]:
+            prompt_template = ChatPromptTemplate.from_messages(
+                [("system", SYSTEM_PROMPT), ("user", LLM_ONLY_ICL)],
+            )
+            # rag_chain = prompt_template | self.chat_model | StrOutputParser() | self.get_final_answer
+            rag_chain = prompt_template | self.chat_model | StrOutputParser()
+            response = rag_chain.invoke({"query": query, "query_time": query_time,"invalid_questions_examples":self.invalid_questions_examples[domain]})
+            kg_info = ""
+        else:
+            response = "I don't know."
+            kg_info = ""
+        # print("query:", query)
+        # print("kg_info:", kg_info)
+        print("response1:", response)
+            # print("response_type:", type(response))
+            # print("contexts:", contexts)
+        return response, contexts, kg_info
+    
+    def generate_answer_(self, input):
+        query = input["query"]
+        query_time = input["query_time"]
+        interaction_id = input["interaction_id"]
+        search_results = input["search_results"]
+        kg_info = input["kg_info"]
+        domain = input["domain"]
+        return self.generate_answer(query, interaction_id, search_results, kg_info, query_time, domain)
+
+    def batch_generate_answer(self, batch: Dict[str, Any]) -> List[str]:
+        batch_interaction_ids = batch["interaction_id"]
+        queries = batch["query"]
+        batch_search_results = batch["search_results"]
+        query_times = batch["query_time"]
+        # kg_infos = batch["kg_info"]
+        # kg_infos = [""] * len(queries)
+        if self.use_domain:
+            domains = self.classify_question_domain(queries)
+            domains = [self.domain_classes[domain] for domain in domains]
+            kg_infos = self.api.get_kg_info(queries, query_times, domains)
+        else:
+            kg_infos = [""] * len(queries)
+        # print("kg_infos:", kg_infos)
+
+        outputs = RunnableLambda(self.generate_answer_).batch([{"query": query, "interaction_id": interaction_id, "search_results": search_results, "kg_info": kg_info, "query_time": query_time, "domain":domain} for query, interaction_id, search_results, kg_info, query_time, domain in zip(queries, batch_interaction_ids, batch_search_results, kg_infos, query_times, domains)])
+        answers = [output[0] for output in outputs]
+        batch_contexts = [output[1] for output in outputs]
+        batch_kg_infos = [output[2] for output in outputs]
+        # print("batch_contexts:", batch_contexts)
+        # print("answers:", answers)
+        # print("batch_kg_infos:", batch_kg_infos)
+        return answers, batch_contexts, batch_kg_infos
+    
+    def get_reference(self, retrieval_results):
+        references = ""
+        if len(retrieval_results) > 1:
+            for _snippet_idx, snippet in enumerate(retrieval_results):
+                references += "<DOC>\n"
+                references += f"{snippet.strip()}\n"
+                references += "</DOC>\n\n"
+        elif len(retrieval_results) == 1 and len(retrieval_results[0]) > 0:
+            references = retrieval_results[0]
+        else:
+            references = "No References"
+        return references
+    
+    def classify_question_domain(self, queries: str) -> int:
+        """
+        Classify the question type based on the provided query.
+
+        Parameters:
+        - query (str): The user's question.
+
+        Returns:
+        - str: The predicted question type.
+
+        This method processes the user's question using a pre-trained router model to classify it into
+        one of the following categories: simple, simple_w_condition, comparison, aggregation, set, post-processing, multi-hop.
+        """
+        # Tokenize the query and generate a classification prediction.
+        inputs = self.router_tokenizer(queries, return_tensors="pt", padding=True, truncation=True)
+
+        # Send all tokenized queries to the model in one batch.
+        outputs = self.domain_router_model(**inputs)
+        logits = outputs.logits
+
+        # Extract the predicted class indices for each query in the batch.
+        predicted_class_indices = logits.argmax(dim=1).tolist()
+
+        return predicted_class_indices
+    
+class RAGModel_HYDE:
+    """
+    An example RAGModel for the KDDCup 2024 Meta CRAG Challenge
+    which includes all the key components of a RAG lifecycle.
+    """
+    def __init__(self, chat_model,  retriever, knowledge_source):
+        self.chat_model = chat_model
+        self.retriever = retriever
+        self.knowledge_source = knowledge_source
+        SYSTEM_PROMPT = "You are a helpful assistant."
+        self.llm_prompt_template = ChatPromptTemplate.from_messages(
+            [("system", SYSTEM_PROMPT), ("user", LLM_ONLY_COT)],
+        )
+        self.hyde_prompt = ChatPromptTemplate.from_messages(
+            [("system", SYSTEM_PROMPT), ("user", HYDE)],
+        )
+        self.hyde_chain = self.hyde_prompt | chat_model | StrOutputParser() 
+        from transformers import AutoTokenizer
+        self.tokenizer = AutoTokenizer.from_pretrained("Meta-Llama-3.1-8B-Instruct")
+
+        self.terminators = [
+            self.tokenizer.eos_token_id,
+            self.tokenizer.convert_tokens_to_ids("<|eot_id|>")
+        ]
+        
+        self.api = MockAPI(self.chat_model, self.terminators, self.tokenizer)
+        self.classify_model_name = "Meta-Llama-3.1-8B-Instruct"
+        self.use_domain = True
+        if self.use_domain:
+            domain_router_model_name = 'models/router/domain'
+            self.domain_classes = ["finance", "music", "movie", "sports", "open"]
+            
+            
+            self.router_tokenizer = AutoTokenizer.from_pretrained(self.classify_model_name)
+            
+            self.domain_router_model = AutoModelForSequenceClassification.from_pretrained(
+                self.classify_model_name,
+                device_map="cpu",
+                num_labels=len(self.domain_classes),
+                # quantization_config=bnb_config,
+                torch_dtype=torch.bfloat16,
+            )
+            self.domain_router_model = PeftModel.from_pretrained(self.domain_router_model, domain_router_model_name, adapter_name="domain_router")
+
+            if self.router_tokenizer.pad_token is None:
+                self.router_tokenizer.pad_token = self.router_tokenizer.eos_token
+            if self.domain_router_model.config.pad_token_id is None:
+                self.domain_router_model.config.pad_token_id = self.router_tokenizer.pad_token_id
+            
+
+    def retrieve(self, input):
+        query = input["query"]
+        interaction_id = input["interaction_id"]
+        search_results = input["search_results"]
+        return self.retriever.retrieve(query, interaction_id, search_results)
+    
+    def generate_answer(self, query, query_re, interaction_id, search_results, kg_info, query_time):
+
+        # print("response_type:", type(response))
+        contexts = []
+        SYSTEM_PROMPT = "You are a helpful assistant."
+        
+        knowledge_source = self.knowledge_source
+        # query_re = self.hyde_chain.invoke({"query": query, "query_time": query_time})
+        print("query_re:", query_re)
+        print("knowledge_source:", knowledge_source)
+        if knowledge_source in ["web","all"]:
+            # Retrieve references from Web
+            contexts = self.retrieve({"query": query_re, "interaction_id": interaction_id, "search_results": search_results})
+            web_info = self.get_reference(contexts)
+        if knowledge_source in ["web"]:
+            prompt_template = ChatPromptTemplate.from_messages(
+                [("system", SYSTEM_PROMPT), ("user", WEB_ONLY)],
+            )
+            # rag_chain = prompt_template | self.chat_model | StrOutputParser() | self.get_final_answer
+            rag_chain = prompt_template | self.chat_model | StrOutputParser()
+            response = rag_chain.invoke({"query": query, "query_time": query_time, "references": web_info})
+            kg_info = ""
+        elif knowledge_source in ["kg"]:
+            prompt_template = ChatPromptTemplate.from_messages(
+                [("system", SYSTEM_PROMPT), ("user", KG_ONLY)],
+            )
+            # rag_chain = prompt_template | self.chat_model | StrOutputParser() | self.get_final_answer
+            rag_chain = prompt_template | self.chat_model | StrOutputParser()
+            response = rag_chain.invoke({"query": query, "query_time": query_time, "references": kg_info})
+        elif knowledge_source in ["llm"]:
+            prompt_template = ChatPromptTemplate.from_messages(
+                [("system", SYSTEM_PROMPT), ("user", LLM_ONLY)],
+            )
+            # rag_chain = prompt_template | self.chat_model | StrOutputParser() | self.get_final_answer
+            rag_chain = prompt_template | self.chat_model | StrOutputParser()
+            response = rag_chain.invoke({"query": query, "query_time": query_time})
+            kg_info = ""
+        elif knowledge_source in ["all"]:
+            prompt_template = ChatPromptTemplate.from_messages(
+                [("system", SYSTEM_PROMPT), ("user", ALL)],
+            )
+            rag_chain = prompt_template | self.chat_model | StrOutputParser() 
+            response = rag_chain.invoke({"query": query, "query_time": query_time, "web_infos": web_info, "kg_infos": kg_info})
+        else:
+            response = "I don't know."
+            kg_info = ""
+        # print("query:", query)
+        # print("kg_info:", kg_info)
+        print("response1:", response)
+            # print("response_type:", type(response))
+            # print("contexts:", contexts)
+        return response, contexts, kg_info
+    
+    def generate_answer_(self, input):
+        query = input["query"]
+        query_re = input["query_re"]
+        query_time = input["query_time"]
+        interaction_id = input["interaction_id"]
+        search_results = input["search_results"]
+        kg_info = input["kg_info"]
+        return self.generate_answer(query, query_re, interaction_id, search_results, kg_info, query_time)
+
+    def batch_generate_answer(self, batch: Dict[str, Any]) -> List[str]:
+        batch_interaction_ids = batch["interaction_id"]
+        queries = batch["query"]
+        batch_search_results = batch["search_results"]
+        query_times = batch["query_time"]
+        query_res = [
+                self.hyde_chain.invoke({"query": q, "query_time": t})
+                    for q, t in zip(queries, query_times)
+                ]
+        # kg_infos = batch["kg_info"]
+        # kg_infos = [""] * len(queries)
+        
+        if self.use_domain:
+            domains = self.classify_question_domain(queries)
+            domains = [self.domain_classes[domain] for domain in domains]
+            if self.knowledge_source in ["kg","all"]:
+                kg_infos = self.api.get_kg_info(query_res, query_times, domains)
+            else:
+                kg_infos = [""] * len(queries)
+        else:
+            kg_infos = [""] * len(queries)
+        # print("kg_infos:", kg_infos)
+
+        outputs = RunnableLambda(self.generate_answer_).batch([{"query": query, "query_re": query_re,  "interaction_id": interaction_id, "search_results": search_results, "kg_info": kg_info, "query_time": query_time} for query, query_re, interaction_id, search_results, kg_info, query_time in zip(queries, query_res, batch_interaction_ids, batch_search_results, kg_infos, query_times)])
+        answers = [output[0] for output in outputs]
+        batch_contexts = [output[1] for output in outputs]
+        batch_kg_infos = [output[2] for output in outputs]
+        # print("batch_contexts:", batch_contexts)
+        # print("answers:", answers)
+        # print("batch_kg_infos:", batch_kg_infos)
+        return answers, batch_contexts, batch_kg_infos
+    
+    def get_reference(self, retrieval_results):
+        references = ""
+        if len(retrieval_results) > 1:
+            for _snippet_idx, snippet in enumerate(retrieval_results):
+                references += "<DOC>\n"
+                references += f"{snippet.strip()}\n"
+                references += "</DOC>\n\n"
+        elif len(retrieval_results) == 1 and len(retrieval_results[0]) > 0:
+            references = retrieval_results[0]
+        else:
+            references = "No References"
+        return references
+    
+    def classify_question_domain(self, queries: str) -> int:
+        """
+        Classify the question type based on the provided query.
+
+        Parameters:
+        - query (str): The user's question.
+
+        Returns:
+        - str: The predicted question type.
+
+        This method processes the user's question using a pre-trained router model to classify it into
+        one of the following categories: simple, simple_w_condition, comparison, aggregation, set, post-processing, multi-hop.
+        """
+        # Tokenize the query and generate a classification prediction.
+        inputs = self.router_tokenizer(queries, return_tensors="pt", padding=True, truncation=True)
+
+        # Send all tokenized queries to the model in one batch.
+        outputs = self.domain_router_model(**inputs)
+        logits = outputs.logits
+
+        # Extract the predicted class indices for each query in the batch.
+        predicted_class_indices = logits.argmax(dim=1).tolist()
+
+        return predicted_class_indices
+    
+
 
 import os
 from collections import defaultdict
