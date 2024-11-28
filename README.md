@@ -6,20 +6,25 @@ For more information, visit our official homepage at https://ustc-rag-x.github.i
 You can read our paper at https://arxiv.org/abs/2409.13694.
 
 ### 📊 Dataset
-The CRAG dataset, central to the KDD Cup 2024, is particularly well-suited for real-world retrieval-based Question Answering (QA) tasks due to its diverse query types and document formats. To enhance its utility, we have significantly processed the original dataset, specifically converting the HTML-formatted web pages containing external knowledge into markdown (MD) format using Jina. This transformation makes the data more accessible and easier for large language models (LLMs) to utilize effectively. 
+In recent years, various datasets have been proposed to challenge and advance RAG, yet most include only a single knowledge source. Real-world applications often involve multiple external knowledge sources, but no suitable benchmark dataset exists for multi-source RAG evaluation. The KDD Cup 2024 CRAG competition dataset, which includes both unstructured web page knowledge and structured mock API data, presents unique challenges. The web page data, in HTML format, contains excessive tags that degrade quality, and the lack of a unified parsing standard complicates evaluation. The mock API, lacking fuzzy matching and consistent entity names, adds further complexity.
+
+To address these issues, we standardized the dataset for RAG evaluation by cleaning the web page data, removing HTML noise, and converting it into a Markdown format compatible with current RAG frameworks. For the mock API, we applied rule-based processing to align entity names with queries and transformed API responses into natural language, improving accessibility for LLM-based reasoning. These improvements enhance dataset usability and establish it as a valuable resource for advancing RAG research.
+
 Our refined version of the dataset, named RM3QA—'A Real-time Multi-domain, Multi-format, Multi-source Question Answer Dataset for RAG'—is now available [here](https://huggingface.co/datasets/fishsure/RM3QA).
 
 ## 🏁 Our RAG framework
 
 ![framework1_00](./README.assets/framework1_00.png)
 
-Our RAG framework, RAG-X, employs an LLM Agent-based Router to intelligently select relevant knowledge sources from a curated mix of structured and unstructured data, including web pages and a mock API. Our retrieval process avoids web searches, focusing exclusively on the provided information sources. The retrieval process is divided into three steps: broad retrieval narrows down vast external knowledge, focused retrieval uses sparse, dense, or hybrid methods to identify key information, and rank refinement ensures the final output is accurate and prioritized.  After retrieval, we enhance the LLM's reasoning with noise chunks, Chain of Thought (CoT), and In-Context Learning (ICL), leading to more  relevant responses.
+The PruningRAG framework processes queries and multi-source knowledge to generate accurate, contextually relevant responses through a systematic workflow. It begins with multi-source knowledge pruning to select high-quality, relevant information. In the coarse-grained stage, a fine-tuned large language model (LLM) filters out irrelevant sources, narrowing the search space. The retained knowledge then undergoes fine-grained pruning, using techniques like BM25, dense retrieval, and rule-based API processing to ensure accuracy and contextual relevance.
+
+The pruned knowledge is integrated with the query and passed to the reasoning component, where techniques like Chain-of-Thought (CoT) reasoning, In-Context Learning (ICL), and noise fusion help generate coherent, grounded responses and reduce hallucinations. Finally, the framework evaluates responses using metrics such as accuracy, hallucination rate, and overall performance, combining string matching with GPT-based assessments to ensure reliable knowledge retrieval and minimize misleading information. This integrated process ensures PruningRAG leverages multi-source knowledge and advanced reasoning for high-quality responses.
 
 ### Router
 
 We designed two specialized routers: the **Domain Router** and the **Dynamism Router**.
 
-We trained **Sentence Classifiers** as routers for Domain and Dynamism based on **Llama3-8B-Instruct**.
+We trained **Sentence Classifiers** as routers for Domain and Dynamism based on **Llama3.1-8B-Instruct**.
 
 Model Weights locate at `models/router`.
 
